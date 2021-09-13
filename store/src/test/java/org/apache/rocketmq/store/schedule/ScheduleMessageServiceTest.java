@@ -40,6 +40,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static org.apache.rocketmq.store.stats.BrokerStatsManager.BROKER_PUT_NUMS;
+import static org.apache.rocketmq.store.stats.BrokerStatsManager.TOPIC_PUT_NUMS;
+import static org.apache.rocketmq.store.stats.BrokerStatsManager.TOPIC_PUT_SIZE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 
@@ -50,7 +53,7 @@ public class ScheduleMessageServiceTest {
      * t
      * defaultMessageDelayLevel = "1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h"
      */
-    String testMessageDelayLevel = "2s 3s";
+    String testMessageDelayLevel = "5s 8s";
     /**
      * choose delay level
      */
@@ -91,8 +94,8 @@ public class ScheduleMessageServiceTest {
     public void init() throws Exception {
         messageStoreConfig = new MessageStoreConfig();
         messageStoreConfig.setMessageDelayLevel(testMessageDelayLevel);
-        messageStoreConfig.setMapedFileSizeCommitLog(commitLogFileSize);
-        messageStoreConfig.setMapedFileSizeConsumeQueue(cqFileSize);
+        messageStoreConfig.setMappedFileSizeCommitLog(commitLogFileSize);
+        messageStoreConfig.setMappedFileSizeConsumeQueue(cqFileSize);
         messageStoreConfig.setMappedFileSizeConsumeQueueExt(cqExtFileSize);
         messageStoreConfig.setMessageIndexEnable(false);
         messageStoreConfig.setEnableConsumeQueueExt(true);
@@ -111,7 +114,11 @@ public class ScheduleMessageServiceTest {
 
 
     @Test
-    public void deliverDelayedMessageTimerTaskTest() throws InterruptedException {
+    public void deliverDelayedMessageTimerTaskTest() throws Exception {
+        assertThat(messageStore.getMessageStoreConfig().isEnableScheduleMessageStats()).isTrue();
+
+        assertThat(messageStore.getBrokerStatsManager().getStatsItem(TOPIC_PUT_NUMS, topic)).isNull();
+
         MessageExtBrokerInner msg = buildMessage();
         int realQueueId = msg.getQueueId();
         // set delayLevel,and send delay message
@@ -119,6 +126,8 @@ public class ScheduleMessageServiceTest {
         PutMessageResult result = messageStore.putMessage(msg);
         assertThat(result.isOk()).isTrue();
 
+        // make sure consumerQueue offset = commitLog offset
+        StoreTestUtil.waitCommitLogReput(messageStore);
 
         // consumer message
         int delayQueueId = ScheduleMessageService.delayLevel2QueueId(delayLevel);
@@ -132,13 +141,17 @@ public class ScheduleMessageServiceTest {
 
         // timer run maybe delay, then consumer message again
         // and wait offsetTable
-        TimeUnit.SECONDS.sleep(3);
+        TimeUnit.SECONDS.sleep(10);
         scheduleMessageService.buildRunningStats(new HashMap<String, String>());
 
         messageResult = getMessage(realQueueId, offset);
         // now,found the message
         assertThat(messageResult.getStatus()).isEqualTo(GetMessageStatus.FOUND);
 
+        // get the stats change
+        assertThat(messageStore.getBrokerStatsManager().getStatsItem(BROKER_PUT_NUMS, brokerConfig.getBrokerClusterName()).getValue().get()).isEqualTo(1);
+        assertThat(messageStore.getBrokerStatsManager().getStatsItem(TOPIC_PUT_NUMS, topic).getValue().get()).isEqualTo(1L);
+        assertThat(messageStore.getBrokerStatsManager().getStatsItem(TOPIC_PUT_SIZE, topic).getValue().get()).isEqualTo(messageResult.getBufferTotalSize());
 
         // get the message body
         ByteBuffer byteBuffer = ByteBuffer.allocate(messageResult.getBufferTotalSize());
@@ -188,7 +201,6 @@ public class ScheduleMessageServiceTest {
 
     @After
     public void shutdown() throws InterruptedException {
-        TimeUnit.SECONDS.sleep(1);
         messageStore.shutdown();
         messageStore.destroy();
         File file = new File(messageStoreConfig.getStorePathRootDir());
